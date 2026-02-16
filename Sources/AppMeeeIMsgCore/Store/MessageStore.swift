@@ -253,10 +253,20 @@ extension MessageStore {
                     bindings.append(participant)
                 }
             }
+            if let fromMe = filter.fromMe {
+                sql += " AND m.is_from_me = ?"
+                bindings.append(fromMe ? 1 : 0)
+            }
         }
 
+        // text_contains is applied post-decode because macOS often stores
+        // message text in attributedBody rather than m.text. Over-fetch to
+        // compensate for post-filtering.
+        let hasTextFilter = filter?.textContains != nil && !filter!.textContains!.isEmpty
+        let sqlLimit = hasTextFilter ? limit * 10 : limit
+
         sql += " ORDER BY m.date DESC LIMIT ?"
-        bindings.append(limit)
+        bindings.append(sqlLimit)
 
         let columns = MessageRowColumns(
             rowID: 0, chatID: nil, handleID: 1, sender: 2, text: 3,
@@ -290,6 +300,11 @@ extension MessageStore {
                         destinationCallerID: decoded.destinationCallerID.isEmpty ? nil : decoded.destinationCallerID
                     )
                 ))
+            }
+            if hasTextFilter, let textContains = filter?.textContains {
+                return Array(messages.filter {
+                    $0.text.localizedCaseInsensitiveContains(textContains)
+                }.prefix(limit))
             }
             return messages
         }

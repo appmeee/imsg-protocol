@@ -1,0 +1,17 @@
+# Swift build artifacts
+.build/
+bin/
+*.o
+*.d
+*.swiftdeps
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Package manager
+Package.resolved

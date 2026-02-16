@@ -1,0 +1,210 @@
+import Foundation
+import ObjectiveC
+
+/// Sends typing indicators for iMessage chats via the IMCore private framework.
+///
+/// Uses runtime `dlopen` to load IMCore, the only way to programmatically toggle
+/// typing state. AppleScript has no equivalent capability.
+///
+/// Requires macOS 14+, Messages.app signed in, and an existing conversation
+/// with the target contact.
+///
+/// Usage:
+/// ```swift
+/// try TypingIndicator.startTyping(chatIdentifier: "iMessage;-;+14155551212")
+/// // ... user composes message ...
+/// try TypingIndicator.stopTyping(chatIdentifier: "iMessage;-;+14155551212")
+/// ```
+public struct TypingIndicator: Sendable {
+    private static let daemonTracker = DaemonConnectionTracker()
+
+    /// Start showing the typing indicator for a chat.
+    ///
+    /// - Parameter chatIdentifier: The chat identifier string,
+    ///   e.g. `"iMessage;-;+14155551212"` or a chat GUID.
+    /// - Throws: `AppMeeeIMsgError.typingIndicatorFailed` if IMCore is unavailable
+    ///   or the chat cannot be found.
+    public static func startTyping(chatIdentifier: String) throws {
+        try setTyping(chatIdentifier: chatIdentifier, isTyping: true)
+    }
+
+    /// Stop showing the typing indicator for a chat.
+    ///
+    /// - Parameter chatIdentifier: The chat identifier string.
+    /// - Throws: `AppMeeeIMsgError.typingIndicatorFailed` if IMCore is unavailable
+    ///   or the chat cannot be found.
+    public static func stopTyping(chatIdentifier: String) throws {
+        try setTyping(chatIdentifier: chatIdentifier, isTyping: false)
+    }
+
+    /// Show the typing indicator for a duration, then automatically stop.
+    ///
+    /// - Parameters:
+    ///   - chatIdentifier: The chat identifier string.
+    ///   - duration: Seconds to show the typing indicator.
+    /// - Throws: `AppMeeeIMsgError.typingIndicatorFailed` on IMCore errors.
+    public static func typeForDuration(chatIdentifier: String, duration: TimeInterval) async throws {
+        try await typeForDuration(
+            chatIdentifier: chatIdentifier,
+            duration: duration,
+            startTyping: { try startTyping(chatIdentifier: $0) },
+            stopTyping: { try stopTyping(chatIdentifier: $0) },
+            sleep: { try await Task.sleep(nanoseconds: $0) }
+        )
+    }
+
+    // MARK: - Private Implementation
+
+    private static func setTyping(chatIdentifier: String, isTyping: Bool) throws {
+        let frameworkPath = "/System/Library/PrivateFrameworks/IMCore.framework/IMCore"
+        guard let handle = dlopen(frameworkPath, RTLD_LAZY) else {
+            let reason = String(cString: dlerror())
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "Failed to load IMCore framework: \(reason)"
+            )
+        }
+        defer { dlclose(handle) }
+
+        try ensureDaemonConnection()
+        let chat = try lookupChat(identifier: chatIdentifier)
+
+        let selector = sel_registerName("setLocalUserIsTyping:")
+        guard let method = class_getInstanceMethod(object_getClass(chat), selector) else {
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "setLocalUserIsTyping: method not found on IMChat"
+            )
+        }
+
+        let implementation = method_getImplementation(method)
+        typealias SetTypingFunc = @convention(c) (AnyObject, Selector, Bool) -> Void
+        let setTypingFunc = unsafeBitCast(implementation, to: SetTypingFunc.self)
+        setTypingFunc(chat, selector, isTyping)
+    }
+
+    /// Testable version with injectable dependencies.
+    static func typeForDuration(
+        chatIdentifier: String,
+        duration: TimeInterval,
+        startTyping: (String) throws -> Void,
+        stopTyping: (String) throws -> Void,
+        sleep: (UInt64) async throws -> Void
+    ) async throws {
+        try startTyping(chatIdentifier)
+        var stopped = false
+        defer {
+            if !stopped {
+                try? stopTyping(chatIdentifier)
+            }
+        }
+        try await sleep(UInt64(duration * 1_000_000_000))
+        try stopTyping(chatIdentifier)
+        stopped = true
+    }
+
+    // MARK: - Daemon Connection
+
+    private static func ensureDaemonConnection() throws {
+        guard let controllerClass = objc_getClass("IMDaemonController") as? NSObject.Type else {
+            throw AppMeeeIMsgError.typingIndicatorFailed("IMDaemonController class not found")
+        }
+
+        let sharedSel = sel_registerName("sharedInstance")
+        guard controllerClass.responds(to: sharedSel) else {
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "IMDaemonController.sharedInstance not available"
+            )
+        }
+
+        guard let controller = controllerClass.perform(sharedSel)?.takeUnretainedValue() else {
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "Failed to get IMDaemonController shared instance"
+            )
+        }
+
+        if hasLiveDaemonConnection(controller) {
+            daemonTracker.lock.lock()
+            daemonTracker.hasAttemptedConnection = true
+            daemonTracker.lock.unlock()
+            return
+        }
+
+        daemonTracker.lock.lock()
+        let shouldConnect = !daemonTracker.hasAttemptedConnection
+        if shouldConnect {
+            daemonTracker.hasAttemptedConnection = true
+        }
+        daemonTracker.lock.unlock()
+
+        guard shouldConnect else { return }
+
+        let connectSel = sel_registerName("connectToDaemon")
+        if controller.responds(to: connectSel) {
+            _ = controller.perform(connectSel)
+        }
+    }
+
+    private static func hasLiveDaemonConnection(_ controller: AnyObject) -> Bool {
+        let isConnectedSel = sel_registerName("isConnected")
+        guard controller.responds(to: isConnectedSel) else { return false }
+        guard let value = controller.perform(isConnectedSel)?.takeUnretainedValue() else {
+            return false
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        return false
+    }
+
+    // MARK: - Chat Lookup
+
+    private static func lookupChat(identifier: String) throws -> NSObject {
+        guard let registryClass = objc_getClass("IMChatRegistry") as? NSObject.Type else {
+            throw AppMeeeIMsgError.typingIndicatorFailed("IMChatRegistry class not found")
+        }
+
+        let sharedSel = sel_registerName("sharedInstance")
+        guard registryClass.responds(to: sharedSel) else {
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "IMChatRegistry.sharedInstance not available"
+            )
+        }
+
+        guard
+            let registry = registryClass.perform(sharedSel)?.takeUnretainedValue() as? NSObject
+        else {
+            throw AppMeeeIMsgError.typingIndicatorFailed(
+                "Failed to get IMChatRegistry shared instance"
+            )
+        }
+
+        let guidSel = sel_registerName("existingChatWithGUID:")
+        if registry.responds(to: guidSel),
+           let chat = registry.perform(guidSel, with: identifier)?
+               .takeUnretainedValue() as? NSObject {
+            return chat
+        }
+
+        let identSel = sel_registerName("existingChatWithChatIdentifier:")
+        if registry.responds(to: identSel),
+           let chat = registry.perform(identSel, with: identifier)?
+               .takeUnretainedValue() as? NSObject {
+            return chat
+        }
+
+        throw AppMeeeIMsgError.typingIndicatorFailed(
+            "Chat not found for identifier: \(identifier). "
+            + "Make sure Messages.app has an active conversation with this contact."
+        )
+    }
+}
+
+// MARK: - Daemon Connection Tracker
+
+/// Process-level singleton that ensures `connectToDaemon` is called at most once.
+///
+/// Uses `NSLock` for thread safety since this may be accessed from multiple
+/// threads concurrently (e.g. parallel typing indicator calls).
+private final class DaemonConnectionTracker: @unchecked Sendable {
+    let lock = NSLock()
+    var hasAttemptedConnection = false
+}

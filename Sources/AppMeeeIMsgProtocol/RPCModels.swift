@@ -176,7 +176,7 @@ func chatPayload(
         "service": service,
         "participants": participants,
         "is_group": isGroup,
-        "last_message_at": ISO8601Formatter.format(lastMessageAt),
+        "last_message_date": ISO8601Formatter.format(lastMessageAt),
     ]
 }
 
@@ -192,21 +192,21 @@ func messagePayload(
     let isGroup = chatIdentifier.contains(";+;") || chatGUID.contains(";+;")
 
     return [
-        "id": message.rowID,
+        "row_id": message.rowID,
         "chat_id": message.chatID,
         "guid": message.guid,
         "sender": message.sender,
         "is_from_me": message.isFromMe,
-        "text": message.text,
-        "created_at": ISO8601Formatter.format(message.date),
+        "text": message.text as Any? ?? NSNull(),
+        "date": ISO8601Formatter.format(message.date),
         "service": message.service,
         "handle_id": message.handleID as Any? ?? NSNull(),
-        "attachments_count": message.attachmentsCount,
+        "has_attachments": message.attachmentsCount > 0,
         "is_reaction": message.isReaction,
         "reaction_type": message.reactionType?.name as Any? ?? NSNull(),
         "reaction_emoji": message.reactionType?.emoji as Any? ?? NSNull(),
-        "is_reaction_add": message.isReactionAdd as Any? ?? NSNull(),
-        "reacted_to_guid": message.reactedToGUID as Any? ?? NSNull(),
+        "is_reaction_removal": message.isReactionAdd == false,
+        "associated_message_guid": message.reactedToGUID as Any? ?? NSNull(),
         "reply_to_guid": message.replyToGUID as Any? ?? NSNull(),
         "thread_originator_guid": message.threadOriginatorGUID as Any? ?? NSNull(),
         "destination_caller_id": message.destinationCallerID as Any? ?? NSNull(),
@@ -226,9 +226,9 @@ func attachmentPayload(_ meta: AttachmentMeta) -> [String: Any] {
         "transfer_name": meta.transferName,
         "uti": meta.uti,
         "mime_type": meta.mimeType,
-        "total_bytes": meta.totalBytes,
+        "size": meta.totalBytes,
         "is_sticker": meta.isSticker,
-        "original_path": meta.originalPath,
+        "path": meta.originalPath,
         "missing": meta.missing,
     ]
 }
@@ -240,8 +240,9 @@ func reactionPayload(_ reaction: Reaction) -> [String: Any] {
         "emoji": reaction.reactionType.emoji,
         "sender": reaction.sender,
         "is_from_me": reaction.isFromMe,
+        "is_removal": false,
         "associated_message_id": reaction.associatedMessageID,
-        "created_at": ISO8601Formatter.format(reaction.date),
+        "date": ISO8601Formatter.format(reaction.date),
     ]
 }
 
@@ -251,13 +252,13 @@ func reactionEventPayload(_ event: ReactionEvent) -> [String: Any] {
         "chat_id": event.chatID,
         "type": event.reactionType.name,
         "emoji": event.reactionType.emoji,
-        "is_add": event.isAdd,
+        "is_removal": !event.isAdd,
         "sender": event.sender,
         "is_from_me": event.isFromMe,
-        "reacted_to_guid": event.reactedToGUID,
+        "associated_message_guid": event.reactedToGUID,
         "reacted_to_id": event.reactedToID as Any? ?? NSNull(),
         "text": event.text,
-        "created_at": ISO8601Formatter.format(event.date),
+        "date": ISO8601Formatter.format(event.date),
     ]
 }
 

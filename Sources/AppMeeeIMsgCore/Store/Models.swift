@@ -557,22 +557,32 @@ public struct MessageFilter: Sendable, Equatable {
     public let startDate: Date?
     /// Only return messages before this date.
     public let endDate: Date?
+    /// Only return messages whose text contains this substring (case-insensitive).
+    public let textContains: String?
+    /// Only return messages matching this is_from_me value.
+    public let fromMe: Bool?
 
     public init(
         participants: [String] = [],
         startDate: Date? = nil,
-        endDate: Date? = nil
+        endDate: Date? = nil,
+        textContains: String? = nil,
+        fromMe: Bool? = nil
     ) {
         self.participants = participants
         self.startDate = startDate
         self.endDate = endDate
+        self.textContains = textContains
+        self.fromMe = fromMe
     }
 
     /// Creates a filter by parsing ISO 8601 date strings.
     public static func fromISO(
         participants: [String] = [],
         startISO: String? = nil,
-        endISO: String? = nil
+        endISO: String? = nil,
+        textContains: String? = nil,
+        fromMe: Bool? = nil
     ) throws -> MessageFilter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -594,7 +604,9 @@ public struct MessageFilter: Sendable, Equatable {
         return MessageFilter(
             participants: participants,
             startDate: start,
-            endDate: end
+            endDate: end,
+            textContains: textContains,
+            fromMe: fromMe
         )
     }
 
@@ -602,6 +614,12 @@ public struct MessageFilter: Sendable, Equatable {
     public func allows(_ message: Message) -> Bool {
         if let startDate, message.date < startDate { return false }
         if let endDate, message.date >= endDate { return false }
+        if let fromMe, message.isFromMe != fromMe { return false }
+        if let textContains, !textContains.isEmpty {
+            if !message.text.localizedCaseInsensitiveContains(textContains) {
+                return false
+            }
+        }
         if !participants.isEmpty {
             var match = false
             for participant in participants {

@@ -46,12 +46,17 @@ extension RPCServer {
         let participants = stringArrayParam(params["participants"])
         let startISO = stringParam(params["start"])
         let endISO = stringParam(params["end"])
+        let textContains = stringParam(params["text_contains"])
+        let fromMe = boolParam(params["from_me"])
         let includeAttachments = boolParam(params["attachments"]) ?? false
+        let includeReactions = boolParam(params["include_reactions"]) ?? false
 
         let filter = try MessageFilter.fromISO(
             participants: participants,
             startISO: startISO,
-            endISO: endISO
+            endISO: endISO,
+            textContains: textContains,
+            fromMe: fromMe
         )
 
         let messages = try store.messages(chatID: chatID, limit: max(limit, 1), filter: filter)
@@ -62,7 +67,8 @@ extension RPCServer {
         for message in messages {
             let payload = try await buildMessagePayload(
                 message: message,
-                includeAttachments: includeAttachments
+                includeAttachments: includeAttachments,
+                includeReactions: includeReactions
             )
             payloads.append(payload)
         }
@@ -108,7 +114,7 @@ extension RPCServer {
                     let chatInfo = try await localCache.info(chatID: message.chatID)
                     let chatParticipants = try await localCache.participants(chatID: message.chatID)
                     let attachments = includeAttachments ? try localStore.attachments(for: message.rowID) : []
-                    let reactions = includeAttachments ? try localStore.reactions(for: message.rowID) : []
+                    let reactions = includeReactions ? try localStore.reactions(for: message.rowID) : []
                     let payload = messagePayload(
                         message: message,
                         chatInfo: chatInfo,
@@ -282,12 +288,13 @@ extension RPCServer {
 
     private func buildMessagePayload(
         message: Message,
-        includeAttachments: Bool
+        includeAttachments: Bool,
+        includeReactions: Bool = false
     ) async throws -> [String: Any] {
         let chatInfo = try await cache.info(chatID: message.chatID)
         let participants = try await cache.participants(chatID: message.chatID)
         let attachments = includeAttachments ? try store.attachments(for: message.rowID) : []
-        let reactions = includeAttachments ? try store.reactions(for: message.rowID) : []
+        let reactions = includeReactions ? try store.reactions(for: message.rowID) : []
         return messagePayload(
             message: message,
             chatInfo: chatInfo,

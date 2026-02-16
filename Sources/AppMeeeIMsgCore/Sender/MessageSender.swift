@@ -1,6 +1,5 @@
 import Carbon
 import Foundation
-@preconcurrency import PhoneNumberKit
 
 /// Sends iMessages and SMS via AppleScript using the Messages.app scripting interface.
 ///
@@ -293,21 +292,3 @@ public struct MessageSender: Sendable {
     }
 }
 
-// MARK: - Phone Number Normalization
-
-/// Normalizes phone numbers to E.164 format using PhoneNumberKit.
-///
-/// Marked `@unchecked Sendable` because `PhoneNumberUtility` is stateless
-/// after initialization but does not declare `Sendable` conformance.
-final class PhoneNumberNormalizer: @unchecked Sendable {
-    private let phoneNumberUtility = PhoneNumberUtility()
-
-    func normalize(_ input: String, region: String) -> String {
-        do {
-            let number = try phoneNumberUtility.parse(input, withRegion: region, ignoreType: true)
-            return phoneNumberUtility.format(number, toType: .e164)
-        } catch {
-            return input
-        }
-    }
-}

@@ -33,6 +33,15 @@ let package = Package(
             name: "AppMeeeIMsgCoreTests",
             dependencies: [
                 "AppMeeeIMsgCore",
+                .product(name: "SQLite", package: "SQLite.swift"),
+            ]
+        ),
+        .testTarget(
+            name: "AppMeeeIMsgProtocolTests",
+            dependencies: [
+                "AppMeeeIMsgCore",
+                "AppMeeeIMsgProtocol",
+                .product(name: "SQLite", package: "SQLite.swift"),
             ]
         ),
     ]

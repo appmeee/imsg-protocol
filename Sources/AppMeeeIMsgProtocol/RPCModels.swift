@@ -1,35 +1,87 @@
 import Foundation
 import AppMeeeIMsgCore
 
+// MARK: - RPCOutput Protocol
+
+/// Abstraction for JSON-RPC output, enabling testability.
+protocol RPCOutput: Sendable {
+    func sendResponse(id: Any, result: Any)
+    func sendError(id: Any?, error: RPCError)
+    func sendNotification(method: String, params: Any)
+}
+
+// MARK: - RPCWriter
+
+/// Default `RPCOutput` implementation that writes to stdout.
+final class RPCWriter: RPCOutput, Sendable {
+    func sendResponse(id: Any, result: Any) {
+        send(["jsonrpc": "2.0", "id": id, "result": result])
+    }
+
+    func sendError(id: Any?, error: RPCError) {
+        send([
+            "jsonrpc": "2.0",
+            "id": id ?? NSNull(),
+            "error": error.toDictionary(),
+        ])
+    }
+
+    func sendNotification(method: String, params: Any) {
+        send(["jsonrpc": "2.0", "method": method, "params": params])
+    }
+
+    private func send(_ object: Any) {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+            if let output = String(data: data, encoding: .utf8) {
+                StdoutWriter.writeLine(output)
+            }
+        } catch {
+            StdoutWriter.writeLine(
+                "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"write failed\"}}"
+            )
+        }
+    }
+}
+
 // MARK: - RPCError
 
 /// A JSON-RPC 2.0 error with a numeric code and human-readable message.
 struct RPCError: Error, Sendable {
     let code: Int
     let message: String
+    let data: String?
+
+    init(code: Int, message: String, data: String? = nil) {
+        self.code = code
+        self.message = message
+        self.data = data
+    }
 
     static func parseError(_ message: String) -> RPCError {
-        RPCError(code: -32700, message: message)
+        RPCError(code: -32700, message: "Parse error", data: message)
     }
 
     static func invalidRequest(_ message: String) -> RPCError {
-        RPCError(code: -32600, message: message)
+        RPCError(code: -32600, message: "Invalid Request", data: message)
     }
 
-    static func methodNotFound(_ message: String) -> RPCError {
-        RPCError(code: -32601, message: message)
+    static func methodNotFound(_ method: String) -> RPCError {
+        RPCError(code: -32601, message: "Method not found", data: method)
     }
 
     static func invalidParams(_ message: String) -> RPCError {
-        RPCError(code: -32602, message: message)
+        RPCError(code: -32602, message: "Invalid params", data: message)
     }
 
     static func internalError(_ message: String) -> RPCError {
-        RPCError(code: -32603, message: message)
+        RPCError(code: -32603, message: "Internal error", data: message)
     }
 
     func toDictionary() -> [String: Any] {
-        ["code": code, "message": message]
+        var dict: [String: Any] = ["code": code, "message": message]
+        if let data { dict["data"] = data }
+        return dict
     }
 }
 
@@ -40,29 +92,23 @@ actor SubscriptionStore {
     private var nextID: Int = 1
     private var tasks: [Int: Task<Void, Never>] = [:]
 
-    /// Returns the next available subscription ID and increments the counter.
     func allocateID() -> Int {
         let id = nextID
         nextID += 1
         return id
     }
 
-    /// Stores a background task for the given subscription ID.
     func insert(_ task: Task<Void, Never>, for id: Int) {
         tasks[id] = task
     }
 
-    /// Removes and returns the task for the given subscription ID.
     @discardableResult
     func remove(_ id: Int) -> Task<Void, Never>? {
         tasks.removeValue(forKey: id)
     }
 
-    /// Cancels every active subscription and clears the store.
     func cancelAll() {
-        for task in tasks.values {
-            task.cancel()
-        }
+        for task in tasks.values { task.cancel() }
         tasks.removeAll()
     }
 }
@@ -70,42 +116,34 @@ actor SubscriptionStore {
 // MARK: - ChatCache
 
 /// Actor-isolated cache for chat metadata and participant lists.
-///
-/// Avoids repeated SQLite queries for the same chat during a single
-/// server session by caching results from `MessageStore`.
 actor ChatCache {
     private let store: MessageStore
-    private var infoCache: [Int64: ChatInfo?] = [:]
+    private var infoCache: [Int64: ChatInfo] = [:]
     private var participantsCache: [Int64: [String]] = [:]
 
     init(store: MessageStore) {
         self.store = store
     }
 
-    /// Returns cached chat info, or queries the store on first access.
     func info(chatID: Int64) throws -> ChatInfo? {
-        if let cached = infoCache[chatID] {
-            return cached
+        if let cached = infoCache[chatID] { return cached }
+        if let info = try store.chatInfo(chatID: chatID) {
+            infoCache[chatID] = info
+            return info
         }
-        let result = try store.chatInfo(chatID: chatID)
-        infoCache[chatID] = result
-        return result
+        return nil
     }
 
-    /// Returns cached participant list, or queries the store on first access.
     func participants(chatID: Int64) throws -> [String] {
-        if let cached = participantsCache[chatID] {
-            return cached
-        }
-        let result = try store.participants(chatID: chatID)
-        participantsCache[chatID] = result
-        return result
+        if let cached = participantsCache[chatID] { return cached }
+        let participants = try store.participants(chatID: chatID)
+        participantsCache[chatID] = participants
+        return participants
     }
 }
 
 // MARK: - ISO8601Formatter
 
-/// Namespace for thread-safe ISO 8601 date formatting.
 enum ISO8601Formatter {
     private nonisolated(unsafe) static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -113,7 +151,6 @@ enum ISO8601Formatter {
         return f
     }()
 
-    /// Formats a `Date` as an ISO 8601 string with fractional seconds.
     static func format(_ date: Date) -> String {
         formatter.string(from: date)
     }
@@ -121,39 +158,28 @@ enum ISO8601Formatter {
 
 // MARK: - Payload Builders
 
-/// Builds a JSON-compatible dictionary representing a chat.
 func chatPayload(
     id: Int64,
     identifier: String,
     guid: String,
-    name: String?,
+    name: String,
     service: String,
-    lastMessageDate: Date?,
+    lastMessageAt: Date,
     participants: [String]
 ) -> [String: Any] {
     let isGroup = identifier.contains(";+;") || guid.contains(";+;")
-
-    var dict: [String: Any] = [
+    return [
         "id": id,
         "identifier": identifier,
         "guid": guid,
+        "name": name,
         "service": service,
         "participants": participants,
         "is_group": isGroup,
+        "last_message_at": ISO8601Formatter.format(lastMessageAt),
     ]
-
-    dict["name"] = name as Any? ?? NSNull()
-
-    if let date = lastMessageDate {
-        dict["last_message_at"] = ISO8601Formatter.format(date)
-    } else {
-        dict["last_message_at"] = NSNull()
-    }
-
-    return dict
 }
 
-/// Builds a JSON-compatible dictionary representing a message with all related data.
 func messagePayload(
     message: Message,
     chatInfo: ChatInfo?,
@@ -165,22 +191,25 @@ func messagePayload(
     let chatGUID = chatInfo?.guid ?? ""
     let isGroup = chatIdentifier.contains(";+;") || chatGUID.contains(";+;")
 
-    let dict: [String: Any] = [
+    return [
         "id": message.rowID,
         "chat_id": message.chatID,
         "guid": message.guid,
         "sender": message.sender,
         "is_from_me": message.isFromMe,
-        "text": message.text as Any? ?? NSNull(),
+        "text": message.text,
         "created_at": ISO8601Formatter.format(message.date),
         "service": message.service,
-        "has_attachments": message.hasAttachments,
+        "handle_id": message.handleID as Any? ?? NSNull(),
+        "attachments_count": message.attachmentsCount,
         "is_reaction": message.isReaction,
         "reaction_type": message.reactionType?.name as Any? ?? NSNull(),
         "reaction_emoji": message.reactionType?.emoji as Any? ?? NSNull(),
-        "is_reaction_removal": message.isReactionRemoval,
-        "associated_message_guid": message.associatedMessageGUID as Any? ?? NSNull(),
+        "is_reaction_add": message.isReactionAdd as Any? ?? NSNull(),
+        "reacted_to_guid": message.reactedToGUID as Any? ?? NSNull(),
         "reply_to_guid": message.replyToGUID as Any? ?? NSNull(),
+        "thread_originator_guid": message.threadOriginatorGUID as Any? ?? NSNull(),
+        "destination_caller_id": message.destinationCallerID as Any? ?? NSNull(),
         "chat_identifier": chatIdentifier,
         "chat_guid": chatGUID,
         "chat_name": chatInfo?.name as Any? ?? NSNull(),
@@ -189,39 +218,51 @@ func messagePayload(
         "attachments": attachments.map { attachmentPayload($0) },
         "reactions": reactions.map { reactionPayload($0) },
     ]
-
-    return dict
 }
 
-/// Builds a JSON-compatible dictionary representing an attachment.
 func attachmentPayload(_ meta: AttachmentMeta) -> [String: Any] {
     [
-        "filename": meta.filename as Any? ?? NSNull(),
-        "transfer_name": meta.transferName as Any? ?? NSNull(),
-        "uti": meta.uti as Any? ?? NSNull(),
-        "mime_type": meta.mimeType as Any? ?? NSNull(),
+        "filename": meta.filename,
+        "transfer_name": meta.transferName,
+        "uti": meta.uti,
+        "mime_type": meta.mimeType,
         "total_bytes": meta.totalBytes,
         "is_sticker": meta.isSticker,
-        "original_path": meta.originalPath as Any? ?? NSNull(),
+        "original_path": meta.originalPath,
         "missing": meta.missing,
     ]
 }
 
-/// Builds a JSON-compatible dictionary representing a reaction.
 func reactionPayload(_ reaction: Reaction) -> [String: Any] {
     [
-        "type": reaction.reactionType?.name as Any? ?? NSNull(),
-        "emoji": reaction.reactionType?.emoji as Any? ?? NSNull(),
+        "row_id": reaction.rowID,
+        "type": reaction.reactionType.name,
+        "emoji": reaction.reactionType.emoji,
         "sender": reaction.sender,
         "is_from_me": reaction.isFromMe,
-        "is_removal": reaction.isRemoval,
+        "associated_message_id": reaction.associatedMessageID,
         "created_at": ISO8601Formatter.format(reaction.date),
+    ]
+}
+
+func reactionEventPayload(_ event: ReactionEvent) -> [String: Any] {
+    [
+        "row_id": event.rowID,
+        "chat_id": event.chatID,
+        "type": event.reactionType.name,
+        "emoji": event.reactionType.emoji,
+        "is_add": event.isAdd,
+        "sender": event.sender,
+        "is_from_me": event.isFromMe,
+        "reacted_to_guid": event.reactedToGUID,
+        "reacted_to_id": event.reactedToID as Any? ?? NSNull(),
+        "text": event.text,
+        "created_at": ISO8601Formatter.format(event.date),
     ]
 }
 
 // MARK: - Parameter Extraction Helpers
 
-/// Extracts a `String` from a loosely-typed JSON parameter value.
 func stringParam(_ value: Any?) -> String? {
     guard let value else { return nil }
     if let s = value as? String { return s }
@@ -232,7 +273,11 @@ func stringParam(_ value: Any?) -> String? {
     return nil
 }
 
-/// Extracts an `Int` from a loosely-typed JSON parameter value.
+func stringArrayParam(_ value: Any?) -> [String] {
+    guard let array = value as? [Any] else { return [] }
+    return array.compactMap { stringParam($0) }
+}
+
 func intParam(_ value: Any?) -> Int? {
     guard let value else { return nil }
     if let i = value as? Int { return i }
@@ -242,7 +287,6 @@ func intParam(_ value: Any?) -> Int? {
     return nil
 }
 
-/// Extracts an `Int64` from a loosely-typed JSON parameter value.
 func int64Param(_ value: Any?) -> Int64? {
     guard let value else { return nil }
     if let i = value as? Int64 { return i }
@@ -252,7 +296,6 @@ func int64Param(_ value: Any?) -> Int64? {
     return nil
 }
 
-/// Extracts a `Bool` from a loosely-typed JSON parameter value.
 func boolParam(_ value: Any?) -> Bool? {
     guard let value else { return nil }
     if let b = value as? Bool { return b }

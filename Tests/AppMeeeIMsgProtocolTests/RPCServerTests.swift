@@ -1,0 +1,310 @@
+import Foundation
+import Testing
+
+@testable import AppMeeeIMsgCore
+@testable import AppMeeeIMsgProtocol
+
+private func int64Value(_ value: Any?) -> Int64? {
+    if let value = value as? Int64 { return value }
+    if let value = value as? Int { return Int64(value) }
+    if let value = value as? NSNumber { return value.int64Value }
+    return nil
+}
+
+@Test func rpcChatsListReturnsChatPayload() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":"1","method":"chats.list","params":{"limit":10}}"#
+    await server.handleLineForTesting(line)
+
+    #expect(output.responses.count == 1)
+    let result = output.responses[0]["result"] as? [String: Any]
+    let chats = result?["chats"] as? [[String: Any]] ?? []
+    #expect(chats.count == 1)
+    let chat = chats[0]
+    #expect(int64Value(chat["id"]) == 1)
+    #expect(chat["identifier"] as? String == "iMessage;+;chat123")
+    #expect(chat["is_group"] as? Bool == true)
+    #expect((chat["participants"] as? [String])?.count == 2)
+}
+
+@Test func rpcMessagesHistoryIncludesChatFields() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line =
+        #"{"jsonrpc":"2.0","id":2,"method":"messages.history","params":{"chat_id":1,"limit":5}}"#
+    await server.handleLineForTesting(line)
+
+    let result = output.responses.first?["result"] as? [String: Any]
+    let messages = result?["messages"] as? [[String: Any]] ?? []
+    #expect(messages.count == 1)
+    let message = messages[0]
+    #expect(int64Value(message["chat_id"]) == 1)
+    #expect(message["chat_identifier"] as? String == "iMessage;+;chat123")
+    #expect(message["is_group"] as? Bool == true)
+}
+
+@Test func rpcSendResolvesChatID() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    var captured: MessageSendOptions?
+    let server = RPCServer(
+        store: store,
+        verbose: false,
+        output: output,
+        sendMessage: { options in captured = options }
+    )
+
+    let line = #"{"jsonrpc":"2.0","id":"3","method":"send","params":{"chat_id":1,"text":"yo"}}"#
+    await server.handleLineForTesting(line)
+
+    #expect(captured?.chatIdentifier == "iMessage;+;chat123")
+    #expect(captured?.chatGUID == "iMessage;+;chat123")
+    #expect(captured?.recipient.isEmpty == true)
+    #expect(output.responses.first?["result"] as? [String: Any] != nil)
+}
+
+@Test func rpcSendRejectsMissingTextAndFile() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":"4","method":"send","params":{"to":"+15551234567"}}"#
+    await server.handleLineForTesting(line)
+
+    #expect(output.errors.count == 1)
+    let error = output.errors[0]["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcRejectsInvalidJSON() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    await server.handleLineForTesting("not-json")
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32700)
+}
+
+@Test func rpcRejectsNonObjectRequest() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    await server.handleLineForTesting("[]")
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32600)
+}
+
+@Test func rpcRejectsInvalidJSONRPCVersion() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"1.0","id":1,"method":"chats.list"}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32600)
+}
+
+@Test func rpcRejectsMissingMethod() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":1}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32600)
+}
+
+@Test func rpcReportsMethodNotFound() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":1,"method":"nope"}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32601)
+}
+
+@Test func rpcHistoryRequiresChatID() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":5,"method":"messages.history","params":{"limit":5}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcSendRejectsInvalidService() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line =
+        #"{"jsonrpc":"2.0","id":6,"method":"send","params":{"to":"+15551234567","text":"hi","service":"fax"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcSendRejectsMissingRecipientForDirectSend() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":7,"method":"send","params":{"text":"hi"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcSendRejectsChatAndRecipient() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line =
+        #"{"jsonrpc":"2.0","id":8,"method":"send","params":{"chat_id":1,"to":"+15551234567","text":"hi"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcSendRejectsUnknownChatID() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":9,"method":"send","params":{"chat_id":999,"text":"hi"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcTypingStartResolvesSMSRecipient() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    var startedIdentifier: String?
+    let server = RPCServer(
+        store: store,
+        verbose: false,
+        output: output,
+        startTyping: { identifier in startedIdentifier = identifier },
+        stopTyping: { _ in }
+    )
+
+    let line =
+        #"{"jsonrpc":"2.0","id":20,"method":"typing.start","params":{"to":"+15551234567","service":"sms"}}"#
+    await server.handleLineForTesting(line)
+
+    #expect(startedIdentifier == "SMS;-;+15551234567")
+    let result = output.responses.first?["result"] as? [String: Any]
+    #expect(result?["ok"] as? Bool == true)
+}
+
+@Test func rpcTypingStopResolvesChatID() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    var stoppedIdentifier: String?
+    let server = RPCServer(
+        store: store,
+        verbose: false,
+        output: output,
+        startTyping: { _ in },
+        stopTyping: { identifier in stoppedIdentifier = identifier }
+    )
+
+    let line = #"{"jsonrpc":"2.0","id":21,"method":"typing.stop","params":{"chat_id":1}}"#
+    await server.handleLineForTesting(line)
+
+    #expect(stoppedIdentifier == "iMessage;+;chat123")
+    let result = output.responses.first?["result"] as? [String: Any]
+    #expect(result?["ok"] as? Bool == true)
+}
+
+@Test func rpcTypingRejectsInvalidService() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line =
+        #"{"jsonrpc":"2.0","id":22,"method":"typing.start","params":{"to":"+15551234567","service":"fax"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcTypingRejectsChatAndRecipient() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line =
+        #"{"jsonrpc":"2.0","id":23,"method":"typing.start","params":{"chat_id":1,"to":"+15551234567"}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
+
+@Test func rpcWatchSubscribeEmitsNotificationAndUnsubscribe() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let subscribe =
+        #"{"jsonrpc":"2.0","id":10,"method":"watch.subscribe","params":{"chat_id":1,"since_rowid":-1}}"#
+    await server.handleLineForTesting(subscribe)
+
+    let result = output.responses.first?["result"] as? [String: Any]
+    let subscription = int64Value(result?["subscription"]) ?? 0
+    #expect(subscription > 0)
+
+    for _ in 0..<20 {
+        if output.notifications.count >= 1 { break }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    #expect(output.notifications.count == 1)
+    let params = output.notifications.first?["params"] as? [String: Any]
+    #expect(int64Value(params?["subscription"]) == subscription)
+    #expect(params?["message"] as? [String: Any] != nil)
+
+    let unsubscribe =
+        #"{"jsonrpc":"2.0","id":11,"method":"watch.unsubscribe","params":{"subscription":\#(subscription)}}"#
+    await server.handleLineForTesting(unsubscribe)
+
+    #expect(output.responses.count >= 2)
+}
+
+@Test func rpcWatchUnsubscribeRequiresSubscription() async throws {
+    let store = try CommandTestDatabase.makeStoreForRPC()
+    let output = TestRPCOutput()
+    let server = RPCServer(store: store, verbose: false, output: output)
+
+    let line = #"{"jsonrpc":"2.0","id":12,"method":"watch.unsubscribe","params":{}}"#
+    await server.handleLineForTesting(line)
+
+    let error = output.errors.first?["error"] as? [String: Any]
+    #expect(int64Value(error?["code"]) == -32602)
+}
